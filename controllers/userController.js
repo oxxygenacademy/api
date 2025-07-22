@@ -2,26 +2,26 @@ const User = require('../models/User');
 const { query } = require('../config/database');
 const { sendSuccess, sendError, sendNotFound } = require('../utils/response');
 
-class UserController {
-  // فحص وجود الجداول والأعمدة
-  static async checkTableStructure(tableName) {
-    try {
-      const tablesResult = await query(`SHOW TABLES LIKE '${tableName}'`);
-      if (tablesResult.length === 0) {
-        return { exists: false, columns: [] };
-      }
-
-      const columns = await query(`DESCRIBE ${tableName}`);
-      return { 
-        exists: true, 
-        columns: columns.map(col => col.Field) 
-      };
-    } catch (error) {
-      console.error(`❌ خطأ في فحص جدول ${tableName}:`, error);
+// فحص وجود الجداول والأعمدة (دالة مستقلة)
+async function checkTableStructure(tableName) {
+  try {
+    const tablesResult = await query(`SHOW TABLES LIKE '${tableName}'`);
+    if (tablesResult.length === 0) {
       return { exists: false, columns: [] };
     }
-  }
 
+    const columns = await query(`DESCRIBE ${tableName}`);
+    return { 
+      exists: true, 
+      columns: columns.map(col => col.Field) 
+    };
+  } catch (error) {
+    console.error(`❌ خطأ في فحص جدول ${tableName}:`, error);
+    return { exists: false, columns: [] };
+  }
+}
+
+class UserController {
   // جلب الملف الشخصي (مُبسط ومتكيف)
   static async getProfile(req, res) {
     try {
@@ -50,7 +50,7 @@ class UserController {
 
       try {
         // فحص وجود جدول enrollments
-        const enrollmentsCheck = await this.checkTableStructure('enrollments');
+        const enrollmentsCheck = await checkTableStructure('enrollments');
         
         if (enrollmentsCheck.exists) {
           const enrollmentsQuery = `
@@ -66,7 +66,7 @@ class UserController {
         }
 
         // فحص وجود جدول certificates
-        const certificatesCheck = await this.checkTableStructure('certificates');
+        const certificatesCheck = await checkTableStructure('certificates');
         
         if (certificatesCheck.exists) {
           const certificatesQuery = `
@@ -95,7 +95,7 @@ class UserController {
       };
 
       try {
-        const preferencesCheck = await this.checkTableStructure('user_preferences');
+        const preferencesCheck = await checkTableStructure('user_preferences');
         
         if (preferencesCheck.exists) {
           const preferencesQuery = `
@@ -151,7 +151,7 @@ class UserController {
       console.log(`🔄 تحديث الملف الشخصي للمستخدم: ${userId}`);
 
       // فحص هيكل جدول المستخدمين
-      const usersCheck = await this.checkTableStructure('users');
+      const usersCheck = await checkTableStructure('users');
       
       // تحديث بيانات المستخدم (الحقول الموجودة فقط)
       const updateFields = [];
@@ -197,7 +197,7 @@ class UserController {
       // تحديث التفضيلات (إذا كان الجدول موجود)
       if (preferences) {
         try {
-          const preferencesCheck = await this.checkTableStructure('user_preferences');
+          const preferencesCheck = await checkTableStructure('user_preferences');
           
           if (preferencesCheck.exists) {
             for (const [key, value] of Object.entries(preferences)) {
@@ -237,7 +237,7 @@ class UserController {
     }
   }
 
-  // جلب كورساتي (مُعاد كتابته ليتكيف مع قاعدة البيانات)
+  // جلب كورساتي (مُعاد كتابته بدون this)
   static async getMyCourses(req, res) {
     try {
       const userId = req.user.id;
@@ -246,8 +246,8 @@ class UserController {
       console.log(`🔍 جلب كورسات المستخدم: ${userId} مع الحالة: ${status}`);
 
       // فحص الجداول المطلوبة
-      const enrollmentsCheck = await this.checkTableStructure('enrollments');
-      const coursesCheck = await this.checkTableStructure('courses');
+      const enrollmentsCheck = await checkTableStructure('enrollments');
+      const coursesCheck = await checkTableStructure('courses');
 
       if (!enrollmentsCheck.exists) {
         console.log('⚠️ جدول enrollments غير موجود');
@@ -346,7 +346,7 @@ class UserController {
       let favorites = [];
       
       try {
-        const favoritesCheck = await this.checkTableStructure('favorites');
+        const favoritesCheck = await checkTableStructure('favorites');
         
         if (favoritesCheck.exists) {
           let favoritesQuery = `
@@ -429,7 +429,7 @@ class UserController {
     }
   }
 
-  // جلب المفضلات (مُبسط)
+  // جلب المفضلات (مُحدث)
   static async getFavorites(req, res) {
     try {
       const userId = req.user.id;
@@ -437,8 +437,8 @@ class UserController {
       console.log(`🔍 جلب مفضلات المستخدم: ${userId}`);
 
       // فحص وجود جدول المفضلات
-      const favoritesCheck = await this.checkTableStructure('favorites');
-      const coursesCheck = await this.checkTableStructure('courses');
+      const favoritesCheck = await checkTableStructure('favorites');
+      const coursesCheck = await checkTableStructure('courses');
 
       if (!favoritesCheck.exists || !coursesCheck.exists) {
         return sendSuccess(res, {
@@ -521,7 +521,7 @@ class UserController {
     }
   }
 
-  // إضافة/إزالة مفضلة (مُبسط)
+  // إضافة/إزالة مفضلة (مُحدث)
   static async toggleFavorite(req, res) {
     try {
       const userId = req.user.id;
@@ -530,8 +530,8 @@ class UserController {
       console.log(`🔄 تبديل مفضلة الكورس: ${courseId} للمستخدم: ${userId}`);
 
       // فحص وجود الجداول
-      const favoritesCheck = await this.checkTableStructure('favorites');
-      const coursesCheck = await this.checkTableStructure('courses');
+      const favoritesCheck = await checkTableStructure('favorites');
+      const coursesCheck = await checkTableStructure('courses');
 
       if (!favoritesCheck.exists) {
         return sendError(res, 'نظام المفضلات غير متاح (الجدول غير موجود)', 503);
@@ -636,7 +636,7 @@ class UserController {
     }
   }
 
-  // جلب الشهادات (مُبسط)
+  // جلب الشهادات (مُحدث)
   static async getCertificates(req, res) {
     try {
       const userId = req.user.id;
@@ -644,7 +644,7 @@ class UserController {
       console.log(`🔍 جلب شهادات المستخدم: ${userId}`);
 
       // فحص وجود جدول الشهادات
-      const certificatesCheck = await this.checkTableStructure('certificates');
+      const certificatesCheck = await checkTableStructure('certificates');
 
       if (!certificatesCheck.exists) {
         return sendSuccess(res, {
