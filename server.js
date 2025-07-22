@@ -16,6 +16,9 @@ const progressRoutes = require('./routes/progress');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// إعداد trust proxy (مهم لـ Render و Heroku)
+app.set('trust proxy', 1);
+
 // الأمان
 app.use(helmet());
 
@@ -25,18 +28,44 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting
+// Rate limiting (محسّن لـ production)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 دقيقة
-  max: 100, // 100 طلب
-  message: { 
-    success: false, 
+  max: (req) => {
+    // حدود مختلفة بناءً على المسار
+    if (req.path.startsWith('/api/auth/login')) {
+      return 5; // 5 محاولات تسجيل دخول كل 15 دقيقة
+    }
+    if (req.path.startsWith('/api/auth')) {
+      return 10; // 10 طلبات مصادقة كل 15 دقيقة
+    }
+    return 100; // 100 طلب عام كل 15 دقيقة
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // استخدام IP من headers المختلفة
+    return req.ip || 
+           req.headers['x-forwarded-for']?.split(',')[0] || 
+           req.headers['x-real-ip'] || 
+           req.connection.remoteAddress || 
+           'unknown';
+  },
+  message: (req) => ({
+    success: false,
     error: {
       code: 'RATE_LIMIT_EXCEEDED',
-      message: 'تجاوزت الحد المسموح من الطلبات'
-    }
+      message: 'تجاوزت الحد المسموح من الطلبات. يرجى المحاولة بعد قليل.',
+      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000)
+    },
+    timestamp: new Date().toISOString()
+  }),
+  skip: (req) => {
+    // تخطي rate limiting للصفحات الأساسية
+    return req.path === '/' || req.path === '/health' || req.path === '/api';
   }
 });
+
 app.use('/api', limiter);
 
 // معالجة JSON
@@ -74,7 +103,9 @@ app.get('/health', async (req, res) => {
         status: 'healthy',
         timestamp: new Date().toISOString(),
         database: dbStatus ? 'connected' : 'disconnected',
-        version: '1.0.0'
+        version: '1.0.0',
+        uptime: process.uptime(),
+        memory: process.memoryUsage()
       },
       message: 'النظام يعمل بشكل طبيعي'
     });
@@ -109,7 +140,12 @@ app.get('/api', (req, res) => {
         'Single Device Login',
         'Progress Tracking',
         'User Management'
-      ]
+      ],
+      rate_limits: {
+        general: '100 requests per 15 minutes',
+        auth: '10 requests per 15 minutes',
+        login: '5 attempts per 15 minutes'
+      }
     },
     message: 'معلومات API'
   });
@@ -126,10 +162,18 @@ app.use('/api/progress', progressRoutes);
 app.use((error, req, res, next) => {
   console.error('❌ خطأ في النظام:', {
     message: error.message,
+    code: error.code,
     url: req.url,
     method: req.method,
+    ip: req.ip,
     timestamp: new Date().toISOString()
   });
+
+  // أخطاء rate limiting
+  if (error.code === 'ERR_ERL_UNEXPECTED_X_FORWARDED_FOR') {
+    console.log('⚠️ تحذير rate limiting - تم تجاهله');
+    return next();
+  }
 
   // أخطاء قاعدة البيانات
   if (error.code) {
@@ -140,6 +184,16 @@ app.use((error, req, res, next) => {
           error: {
             code: 'DATABASE_SUBQUERY_ERROR',
             message: 'خطأ في استعلام قاعدة البيانات'
+          },
+          timestamp: new Date().toISOString()
+        });
+      
+      case 'ER_BAD_FIELD_ERROR':
+        return res.status(500).json({
+          success: false,
+          error: {
+            code: 'DATABASE_FIELD_ERROR',
+            message: 'خطأ في بنية قاعدة البيانات'
           },
           timestamp: new Date().toISOString()
         });
@@ -193,6 +247,7 @@ const startServer = async () => {
         console.log(`🌐 الخادم يعمل على المنفذ: ${PORT}`);
         console.log(`🔗 الرابط: http://localhost:${PORT}`);
         console.log(`📚 API: http://localhost:${PORT}/api`);
+        console.log(`🛡️ Trust Proxy: ${app.get('trust proxy')}`);
         console.log('✅ النظام جاهز للاستخدام');
       });
     } else {
