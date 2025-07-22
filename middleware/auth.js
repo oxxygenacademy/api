@@ -1,122 +1,142 @@
-const { verifyToken, verifyAccessToken, isTokenExpired } = require('../config/jwt');
 const Session = require('../models/Session');
-const { sendUnauthorized } = require('../utils/response');
+const { verifyToken, isTokenExpired } = require('../config/jwt');
 
-// المصادقة الإجبارية (دعم النظام القديم والجديد)
+// مصادقة مطلوبة
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
-      return sendUnauthorized(res, 'مطلوب توكن المصادقة');
-    }
-
-    // محاولة استخدام النظام الجديد أولاً
-    let decoded;
-    let isExpired = false;
-    
-    try {
-      decoded = verifyAccessToken ? verifyAccessToken(token) : verifyToken(token);
-    } catch (error) {
-      if (error.name === 'TokenExpiredError') {
-        isExpired = true;
-      } else {
-        // محاولة النظام القديم
-        try {
-          decoded = verifyToken(token);
-        } catch (oldError) {
-          return sendUnauthorized(res, 'توكن غير صحيح');
-        }
-      }
-    }
-
-    // إذا كان التوكن منتهي الصلاحية، أرسل رسالة خاصة للـ Frontend
-    if (isExpired) {
       return res.status(401).json({
         success: false,
         error: {
-          code: 'TOKEN_EXPIRED',
-          message: 'انتهت صلاحية الجلسة',
-          requires_refresh: true
+          code: 'TOKEN_REQUIRED',
+          message: 'مطلوب توكن المصادقة'
         },
         timestamp: new Date().toISOString()
       });
     }
 
-    // البحث عن الجلسة في قاعدة البيانات
-    const session = await Session.findByAccessToken(token) || await Session.findByToken(token);
-
-    if (!session) {
-      return sendUnauthorized(res, 'جلسة غير صالحة');
+    // التحقق من انتهاء صلاحية التوكن
+    if (isTokenExpired(token)) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'TOKEN_EXPIRED',
+          message: 'انتهت صلاحية التوكن'
+        },
+        timestamp: new Date().toISOString()
+      });
     }
 
-    // تحديث آخر استخدام للجلسة
+    // التحقق من التوكن
+    const decoded = verifyToken(token);
+    
+    // البحث عن الجلسة في قاعدة البيانات
+    const session = await Session.findByToken(token);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'SESSION_NOT_FOUND',
+          message: 'جلسة غير صالحة'
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // تحديث آخر استخدام
     await Session.updateLastUsed(session.id);
 
-    // إرفاق بيانات المستخدم
+    // إضافة معلومات المستخدم والجلسة للطلب
     req.user = {
-      id: session.user_id || session.id,
+      id: session.user_id,
       email: session.email,
       name: session.name,
       avatar: session.avatar,
       email_verified: session.email_verified
     };
-
-    req.session = {
-      id: session.id,
-      expires_at: session.expires_at,
-      refresh_expires_at: session.refresh_expires_at
-    };
-
+    
+    req.session = session;
+    
     next();
   } catch (error) {
     console.error('خطأ في المصادقة:', error);
-    return sendUnauthorized(res, 'خطأ في المصادقة');
+    
+    if (error.message === 'TOKEN_EXPIRED') {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'TOKEN_EXPIRED',
+          message: 'انتهت صلاحية التوكن'
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      error: {
+        code: 'AUTHENTICATION_FAILED',
+        message: 'فشل في المصادقة'
+      },
+      timestamp: new Date().toISOString()
+    });
   }
 };
 
-// المصادقة الاختيارية
+// مصادقة اختيارية
 const optionalAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
+      // لا يوجد توكن، متابعة بدون مستخدم
       req.user = null;
+      req.session = null;
       return next();
     }
 
-    try {
-      const decoded = verifyAccessToken ? verifyAccessToken(token) : verifyToken(token);
-      const session = await Session.findByAccessToken(token) || await Session.findByToken(token);
-
-      if (session) {
-        await Session.updateLastUsed(session.id);
-        
-        req.user = {
-          id: session.user_id || session.id,
-          email: session.email,
-          name: session.name,
-          avatar: session.avatar,
-          email_verified: session.email_verified
-        };
-
-        req.session = {
-          id: session.id,
-          expires_at: session.expires_at,
-          refresh_expires_at: session.refresh_expires_at
-        };
-      } else {
-        req.user = null;
-      }
-    } catch (error) {
+    // التحقق من انتهاء صلاحية التوكن
+    if (isTokenExpired(token)) {
       req.user = null;
+      req.session = null;
+      return next();
     }
 
+    // محاولة التحقق من التوكن
+    const decoded = verifyToken(token);
+    
+    // البحث عن الجلسة في قاعدة البيانات
+    const session = await Session.findByToken(token);
+    if (!session) {
+      req.user = null;
+      req.session = null;
+      return next();
+    }
+
+    // تحديث آخر استخدام
+    await Session.updateLastUsed(session.id);
+
+    // إضافة معلومات المستخدم والجلسة للطلب
+    req.user = {
+      id: session.user_id,
+      email: session.email,
+      name: session.name,
+      avatar: session.avatar,
+      email_verified: session.email_verified
+    };
+    
+    req.session = session;
+    
     next();
   } catch (error) {
+    // في حالة الخطأ، متابعة بدون مستخدم
+    console.log('⚠️ خطأ في المصادقة الاختيارية:', error.message);
     req.user = null;
+    req.session = null;
     next();
   }
 };
