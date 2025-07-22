@@ -7,28 +7,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "setup-db": "node scripts/setup-database.js",
-    "seed-db": "node scripts/seed-database-updated.js",
-    "setup-complete": "node scripts/setup-complete.js",
-    "clean-db": "node scripts/clean-database.js",
-    "update-sessions": "node scripts/add-single-device-support.js",
-    "complete-refresh": "node scripts/complete-refresh-token-support.js",
-    "check-users": "node scripts/check-users.js",
-    "debug-tokens": "node scripts/debug-and-fix-tokens.js",
-    "reset-db": "npm run clean-db && npm run setup-complete",
+    "check-structure": "node scripts/check-database-structure.js",
+    "check-tables": "node scripts/check-and-create-tables.js",
     "test": "echo \"No tests specified\" && exit 0"
   },
-  "keywords": [
-    "courses",
-    "education", 
-    "api",
-    "mysql",
-    "nodejs",
-    "express",
-    "learning-management",
-    "single-device",
-    "security"
-  ],
+  "keywords": ["courses", "education", "api", "mysql", "nodejs"],
   "author": "Oxxygen Academy",
   "license": "MIT",
   "dependencies": {
@@ -46,9 +29,5 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
-  },
-  "engines": {
-    "node": ">=16.0.0",
-    "npm": ">=8.0.0"
   }
 }

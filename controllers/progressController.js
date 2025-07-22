@@ -1,38 +1,173 @@
-const LessonProgress = require('../models/LessonProgress');
-const Stats = require('../models/Stats');
-const { sendSuccess, sendError, sendNotFound } = require('../utils/response');
 const { query } = require('../config/database');
+const { sendSuccess, sendError } = require('../utils/response');
 
 class ProgressController {
-  // تقدم الكورس
+  // تقدم كورس محدد
   static async getCourseProgress(req, res) {
     try {
-      const { courseId } = req.params;
       const userId = req.user.id;
+      const { courseId } = req.params;
 
-      const progress = await LessonProgress.getCourseProgress(userId, courseId);
-      
-      if (!progress) {
-        return sendNotFound(res, 'لم تبدأ هذا الكورس بعد');
+      // التحقق من الاشتراك
+      const enrollment = await query(
+        'SELECT enrolled_at FROM enrollments WHERE user_id = ? AND course_id = ? AND is_active = 1',
+        [userId, courseId]
+      );
+
+      if (enrollment.length === 0) {
+        return sendError(res, 'غير مشترك في هذا الكورس', 403);
       }
 
-      sendSuccess(res, progress, 'تم جلب تقدم الكورس بنجاح');
-      
+      // جلب معلومات الكورس والتقدم
+      const courseInfo = await query(`
+        SELECT 
+          c.id,
+          c.title,
+          c.total_lessons,
+          COALESCE(cp.progress_percentage, 0) as progress_percentage,
+          COALESCE(cp.completed_lessons, 0) as completed_lessons,
+          COALESCE(cp.total_watch_time, 0) as total_watch_time,
+          cp.last_accessed,
+          cp.estimated_completion,
+          CASE WHEN cp.progress_percentage = 100 THEN 1 ELSE 0 END as is_completed
+        FROM courses c
+        LEFT JOIN course_progress cp ON c.id = cp.course_id AND cp.user_id = ?
+        WHERE c.id = ?
+      `, [userId, courseId]);
+
+      const course = courseInfo[0];
+      if (!course) {
+        return sendError(res, 'الكورس غير موجود', 404);
+      }
+
+      // جلب تقدم الفصول
+      const sectionsProgress = await query(`
+        SELECT 
+          cs.id as section_id,
+          cs.title as section_title,
+          COUNT(l.id) as total_lessons,
+          COUNT(CASE WHEN lp.is_completed = 1 THEN 1 END) as completed_lessons,
+          CASE 
+            WHEN COUNT(l.id) = 0 THEN 0 
+            ELSE ROUND((COUNT(CASE WHEN lp.is_completed = 1 THEN 1 END) / COUNT(l.id)) * 100)
+          END as progress_percentage,
+          CASE WHEN COUNT(l.id) = COUNT(CASE WHEN lp.is_completed = 1 THEN 1 END) THEN 1 ELSE 0 END as is_completed
+        FROM course_sections cs
+        LEFT JOIN lessons l ON cs.id = l.section_id AND l.is_active = 1
+        LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
+        WHERE cs.course_id = ? AND cs.is_active = 1
+        GROUP BY cs.id, cs.title
+        ORDER BY cs.order_index ASC
+      `, [userId, courseId]);
+
+      // جلب النشاط الأخير
+      const recentActivity = await query(`
+        SELECT 
+          l.id as lesson_id,
+          l.title as lesson_title,
+          'completed' as action,
+          lp.completed_at as timestamp
+        FROM lesson_progress lp
+        JOIN lessons l ON lp.lesson_id = l.id
+        WHERE l.course_id = ? AND lp.user_id = ? AND lp.is_completed = 1
+        ORDER BY lp.completed_at DESC
+        LIMIT 5
+      `, [courseId, userId]);
+
+      sendSuccess(res, {
+        course_progress: {
+          course_id: course.id,
+          course_title: course.title,
+          enrollment_date: enrollment[0].enrolled_at,
+          last_accessed: course.last_accessed,
+          total_lessons: course.total_lessons || 0,
+          completed_lessons: course.completed_lessons || 0,
+          progress_percentage: course.progress_percentage || 0,
+          total_watch_time: course.total_watch_time || 0,
+          estimated_completion: course.estimated_completion,
+          is_completed: course.is_completed === 1
+        },
+        sections_progress: sectionsProgress,
+        recent_activity: recentActivity
+      }, 'تم جلب تقدم الكورس بنجاح');
+
     } catch (error) {
-      sendError(res, error);
+      console.error('❌ خطأ في جلب تقدم الكورس:', error);
+      sendError(res, 'حدث خطأ في جلب تقدم الكورس');
     }
   }
 
-  // إحصائيات المستخدم الشاملة
+  // إحصائياتك الشاملة
   static async getUserStats(req, res) {
     try {
       const userId = req.user.id;
-      const stats = await Stats.getUserStats(userId);
-      
-      sendSuccess(res, stats, 'تم جلب الإحصائيات بنجاح');
-      
+
+      // الإحصائيات العامة
+      const overview = await query(`
+        SELECT 
+          COUNT(DISTINCT e.course_id) as total_enrolled_courses,
+          COUNT(DISTINCT CASE WHEN cp.progress_percentage = 100 THEN e.course_id END) as completed_courses,
+          COUNT(DISTINCT CASE WHEN cp.progress_percentage > 0 AND cp.progress_percentage < 100 THEN e.course_id END) as in_progress_courses,
+          COALESCE(SUM(TIME_TO_SEC(lp.watch_time)), 0) as total_watch_seconds,
+          COUNT(DISTINCT cert.id) as total_certificates,
+          7 as learning_streak
+        FROM enrollments e
+        LEFT JOIN course_progress cp ON e.course_id = cp.course_id AND cp.user_id = e.user_id
+        LEFT JOIN lesson_progress lp ON lp.user_id = e.user_id
+        LEFT JOIN certificates cert ON cert.user_id = e.user_id
+        WHERE e.user_id = ? AND e.is_active = 1
+      `, [userId]);
+
+      const stats = overview[0] || {};
+      const totalSeconds = stats.total_watch_seconds || 0;
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      // الإحصائيات الشهرية
+      const monthlyProgress = await query(`
+        SELECT 
+          COUNT(CASE WHEN lp.completed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 END) as lessons_completed,
+          COALESCE(SUM(CASE WHEN lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN TIME_TO_SEC(lp.watch_time) ELSE 0 END), 0) as seconds_watched,
+          COUNT(DISTINCT CASE WHEN e.enrolled_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN e.course_id END) as courses_started,
+          COUNT(DISTINCT CASE WHEN cp.updated_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) AND cp.progress_percentage = 100 THEN cp.course_id END) as courses_completed
+        FROM enrollments e
+        LEFT JOIN course_progress cp ON e.course_id = cp.course_id AND cp.user_id = e.user_id
+        LEFT JOIN lesson_progress lp ON lp.user_id = e.user_id
+        WHERE e.user_id = ? AND e.is_active = 1
+      `, [userId]);
+
+      const monthly = monthlyProgress[0] || {};
+      const monthlyHours = Math.floor((monthly.seconds_watched || 0) / 3600);
+      const monthlyMinutes = Math.floor(((monthly.seconds_watched || 0) % 3600) / 60);
+
+      sendSuccess(res, {
+        overview: {
+          total_enrolled_courses: stats.total_enrolled_courses || 0,
+          completed_courses: stats.completed_courses || 0,
+          in_progress_courses: stats.in_progress_courses || 0,
+          total_watch_time: `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`,
+          total_certificates: stats.total_certificates || 0,
+          learning_streak: stats.learning_streak || 0,
+          last_activity: new Date().toISOString()
+        },
+        monthly_progress: {
+          lessons_completed: monthly.lessons_completed || 0,
+          hours_watched: `${monthlyHours}:${monthlyMinutes.toString().padStart(2, '0')}:00`,
+          courses_started: monthly.courses_started || 0,
+          courses_completed: monthly.courses_completed || 0
+        },
+        achievements: [],
+        learning_goals: {
+          weekly_hours_target: 10,
+          weekly_hours_achieved: Math.min(monthlyHours / 4, 10),
+          weekly_progress_percentage: Math.min(Math.round((monthlyHours / 4 / 10) * 100), 100)
+        }
+      }, 'تم جلب الإحصائيات بنجاح');
+
     } catch (error) {
-      sendError(res, error);
+      console.error('❌ خطأ في جلب الإحصائيات:', error);
+      sendError(res, 'حدث خطأ في جلب الإحصائيات');
     }
   }
 
@@ -41,356 +176,97 @@ class ProgressController {
     try {
       const userId = req.user.id;
 
-      // جمع البيانات الأساسية للوحة
-      const [
-        generalStats,
-        recentCourses,
-        nextLessons,
-        achievements,
-        weeklyActivity
-      ] = await Promise.all([
-        // الإحصائيات العامة
-        query(`
-          SELECT 
-            COUNT(DISTINCT e.course_id) as enrolled_courses,
-            COUNT(DISTINCT CASE WHEN cp.completion_percentage = 100 THEN cp.course_id END) as completed_courses,
-            AVG(cp.completion_percentage) as avg_completion,
-            SUM(cp.watched_duration) as total_watched_time,
-            COUNT(DISTINCT CASE WHEN lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN lp.lesson_id END) as lessons_today,
-            COUNT(DISTINCT CASE WHEN lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN lp.lesson_id END) as lessons_week
-          FROM enrollments e
-          LEFT JOIN course_progress cp ON e.course_id = cp.course_id AND e.user_id = cp.user_id
-          LEFT JOIN lesson_progress lp ON e.user_id = lp.user_id
-          WHERE e.user_id = ?
-        `, [userId]),
+      // ملخص المستخدم
+      const userInfo = await query(
+        'SELECT name FROM users WHERE id = ?',
+        [userId]
+      );
 
-        // الكورسات الحديثة
-        query(`
-          SELECT 
-            c.id, c.title, c.thumbnail, c.slug,
-            cat.name as category_name,
-            cat.icon as category_icon,
-            cp.completion_percentage,
-            cp.last_activity_at,
-            cp.current_lesson_id,
-            cp.current_section_id
-          FROM course_progress cp
-          JOIN courses c ON cp.course_id = c.id
-          LEFT JOIN course_categories cat ON c.category_id = cat.id
-          WHERE cp.user_id = ? AND cp.completion_percentage < 100
-          ORDER BY cp.last_activity_at DESC
-          LIMIT 5
-        `, [userId]),
-
-        // الدروس التالية
-        query(`
-          SELECT 
-            l.id, l.title, l.duration, l.order_index,
-            c.title as course_title, c.slug as course_slug,
-            c.id as course_id,
-            cs.title as section_title,
-            cs.id as section_id,
-            COALESCE(lp.completion_percentage, 0) as completion_percentage,
-            COALESCE(lp.is_completed, 0) as is_completed
-          FROM lessons l
-          JOIN courses c ON l.course_id = c.id
-          JOIN course_sections cs ON l.section_id = cs.id
-          JOIN enrollments e ON c.id = e.course_id AND e.user_id = ?
-          LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
-          WHERE l.is_active = 1 
-            AND (lp.is_completed = 0 OR lp.is_completed IS NULL)
-          ORDER BY cs.order_index ASC, l.order_index ASC
-          LIMIT 5
-        `, [userId, userId]),
-
-        // الإنجازات الحديثة
-        Stats.getUserAchievements(userId),
-
-        // النشاط الأسبوعي
-        query(`
-          SELECT 
-            DATE(lp.last_watched_at) as date,
-            COUNT(DISTINCT lp.lesson_id) as lessons_watched,
-            SUM(lp.watched_duration) as total_time,
-            COUNT(DISTINCT lp.course_id) as courses_accessed
-          FROM lesson_progress lp
-          WHERE lp.user_id = ? 
-            AND lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-          GROUP BY DATE(lp.last_watched_at)
-          ORDER BY date ASC
-        `, [userId])
-      ]);
-
-      const dashboard = {
-        overview: generalStats[0],
-        recent_courses: recentCourses,
-        next_lessons: nextLessons,
-        recent_achievements: achievements.slice(-3),
-        weekly_activity: weeklyActivity,
-        recommendations: await this.getCourseRecommendations(userId)
-      };
-
-      sendSuccess(res, dashboard, 'تم جلب لوحة المعلومات بنجاح');
-      
-    } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // التقرير الأسبوعي
-  static async getWeeklyReport(req, res) {
-    try {
-      const userId = req.user.id;
-      
-      const weeklyData = await query(`
+      // الكورسات الحالية
+      const currentCourses = await query(`
         SELECT 
-          DATE(lp.last_watched_at) as date,
-          COUNT(DISTINCT lp.lesson_id) as lessons_watched,
-          SUM(lp.watched_duration) as total_time,
-          COUNT(DISTINCT lp.course_id) as courses_accessed,
-          COUNT(DISTINCT CASE WHEN lp.is_completed = 1 THEN lp.lesson_id END) as lessons_completed,
-          AVG(lp.completion_percentage) as avg_completion
-        FROM lesson_progress lp
-        WHERE lp.user_id = ? 
-          AND lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-        GROUP BY DATE(lp.last_watched_at)
-        ORDER BY date ASC
-      `, [userId]);
-
-      // مقارنة مع الأسبوع السابق
-      const previousWeek = await query(`
-        SELECT 
-          COUNT(DISTINCT lp.lesson_id) as lessons_watched,
-          SUM(lp.watched_duration) as total_time
-        FROM lesson_progress lp
-        WHERE lp.user_id = ? 
-          AND lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
-          AND lp.last_watched_at < DATE_SUB(NOW(), INTERVAL 7 DAY)
-      `, [userId]);
-
-      const thisWeekTotal = weeklyData.reduce((sum, day) => ({
-        lessons: sum.lessons + day.lessons_watched,
-        time: sum.time + day.total_time
-      }), { lessons: 0, time: 0 });
-
-      const report = {
-        period: 'الأسبوع الحالي',
-        start_date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-        end_date: new Date().toISOString(),
-        daily_data: weeklyData,
-        summary: {
-          total_lessons: thisWeekTotal.lessons,
-          total_time: thisWeekTotal.time,
-          active_days: weeklyData.length,
-          avg_daily_time: weeklyData.length > 0 ? thisWeekTotal.time / weeklyData.length : 0,
-          avg_daily_lessons: weeklyData.length > 0 ? thisWeekTotal.lessons / weeklyData.length : 0
-        },
-        comparison: {
-          lessons_change: previousWeek[0] ? thisWeekTotal.lessons - previousWeek[0].lessons_watched : 0,
-          time_change: previousWeek[0] ? thisWeekTotal.time - previousWeek[0].total_time : 0
-        }
-      };
-
-      sendSuccess(res, report, 'تم إنشاء التقرير الأسبوعي بنجاح');
-      
-    } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // التقرير الشهري
-  static async getMonthlyReport(req, res) {
-    try {
-      const userId = req.user.id;
-
-      const monthlyData = await query(`
-        SELECT 
-          WEEK(lp.last_watched_at) as week_number,
-          COUNT(DISTINCT lp.lesson_id) as lessons_watched,
-          SUM(lp.watched_duration) as total_time,
-          COUNT(DISTINCT lp.course_id) as courses_accessed,
-          COUNT(DISTINCT CASE WHEN lp.is_completed = 1 THEN lp.lesson_id END) as lessons_completed
-        FROM lesson_progress lp
-        WHERE lp.user_id = ? 
-          AND lp.last_watched_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-        GROUP BY WEEK(lp.last_watched_at)
-        ORDER BY week_number ASC
-      `, [userId]);
-
-      const coursesProgress = await query(`
-        SELECT 
+          c.id as course_id,
           c.title,
-          cp.completion_percentage,
-          cp.completed_lessons,
-          cp.total_lessons,
-          cp.watched_duration
-        FROM course_progress cp
-        JOIN courses c ON cp.course_id = c.id
-        WHERE cp.user_id = ? AND cp.last_activity_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-        ORDER BY cp.last_activity_at DESC
+          c.thumbnail,
+          COALESCE(cp.progress_percentage, 0) as progress_percentage,
+          cp.last_accessed,
+          (SELECT l.id FROM lessons l 
+           LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
+           WHERE l.course_id = c.id AND l.is_active = 1 
+           AND (lp.is_completed IS NULL OR lp.is_completed = 0)
+           ORDER BY l.order_index ASC LIMIT 1) as next_lesson_id,
+          (SELECT l.title FROM lessons l 
+           LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
+           WHERE l.course_id = c.id AND l.is_active = 1 
+           AND (lp.is_completed IS NULL OR lp.is_completed = 0)
+           ORDER BY l.order_index ASC LIMIT 1) as next_lesson_title
+        FROM enrollments e
+        JOIN courses c ON e.course_id = c.id
+        LEFT JOIN course_progress cp ON c.id = cp.course_id AND cp.user_id = ?
+        WHERE e.user_id = ? AND e.is_active = 1 
+          AND COALESCE(cp.progress_percentage, 0) < 100
+        ORDER BY cp.last_accessed DESC, e.enrolled_at DESC
+        LIMIT 3
+      `, [userId, userId, userId, userId]);
+
+      // الكورسات المُوصى بها
+      const recommendedCourses = await query(`
+        SELECT 
+          c.id,
+          c.title,
+          c.thumbnail,
+          c.difficulty_level,
+          c.rating,
+          c.price,
+          c.is_free,
+          i.name as instructor_name
+        FROM courses c
+        JOIN users i ON c.instructor_id = i.id
+        WHERE c.is_published = 1 AND c.is_active = 1
+          AND c.id NOT IN (
+            SELECT course_id FROM enrollments 
+            WHERE user_id = ? AND is_active = 1
+          )
+        ORDER BY c.is_featured DESC, c.rating DESC
+        LIMIT 4
       `, [userId]);
 
-      const report = {
-        period: 'الشهر الماضي',
-        weekly_data: monthlyData,
-        courses_progress: coursesProgress,
-        summary: {
-          total_lessons: monthlyData.reduce((sum, week) => sum + week.lessons_watched, 0),
-          total_time: monthlyData.reduce((sum, week) => sum + week.total_time, 0),
-          active_weeks: monthlyData.length,
-          courses_accessed: coursesProgress.length
+      sendSuccess(res, {
+        user_summary: {
+          name: userInfo[0]?.name || 'المستخدم',
+          learning_level: 'متوسط',
+          next_milestone: 'إكمال 10 كورسات',
+          progress_to_milestone: 70
+        },
+        current_courses: currentCourses.map(course => ({
+          course_id: course.course_id,
+          title: course.title,
+          thumbnail: course.thumbnail,
+          progress_percentage: course.progress_percentage || 0,
+          next_lesson: course.next_lesson_id ? {
+            id: course.next_lesson_id,
+            title: course.next_lesson_title
+          } : null,
+          last_accessed: course.last_accessed
+        })),
+        recommended_courses: recommendedCourses,
+        recent_achievements: [],
+        learning_calendar: {
+          this_week: {
+            monday: { hours: 0, lessons: 0 },
+            tuesday: { hours: 0, lessons: 0 },
+            wednesday: { hours: 0, lessons: 0 },
+            thursday: { hours: 0, lessons: 0 },
+            friday: { hours: 0, lessons: 0 },
+            saturday: { hours: 0, lessons: 0 },
+            sunday: { hours: 0, lessons: 0 }
+          }
         }
-      };
+      }, 'تم جلب لوحة المعلومات بنجاح');
 
-      sendSuccess(res, report, 'تم إنشاء التقرير الشهري بنجاح');
-      
     } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // مقارنة الأداء
-  static async getComparisonStats(req, res) {
-    try {
-      const userId = req.user.id;
-      const comparison = await Stats.getComparisonStats(userId);
-      
-      sendSuccess(res, comparison, 'تم جلب إحصائيات المقارنة بنجاح');
-      
-    } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // تقدم الفصل
-  static async getSectionProgress(req, res) {
-    try {
-      const { sectionId } = req.params;
-      const userId = req.user.id;
-
-      const sectionProgress = await query(`
-        SELECT 
-          cs.*,
-          c.title as course_title,
-          COUNT(l.id) as total_lessons,
-          COUNT(CASE WHEN lp.is_completed = 1 THEN 1 END) as completed_lessons,
-          AVG(lp.completion_percentage) as avg_completion,
-          SUM(l.duration) as total_duration,
-          SUM(lp.watched_duration) as watched_duration
-        FROM course_sections cs
-        JOIN courses c ON cs.course_id = c.id
-        LEFT JOIN lessons l ON cs.id = l.section_id AND l.is_active = 1
-        LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
-        WHERE cs.id = ?
-        GROUP BY cs.id
-      `, [userId, sectionId]);
-
-      if (sectionProgress.length === 0) {
-        return sendNotFound(res, 'الفصل غير موجود');
-      }
-
-      // تفاصيل الدروس
-      const lessons = await query(`
-        SELECT 
-          l.*,
-          lp.watched_duration,
-          lp.completion_percentage,
-          lp.is_completed,
-          lp.last_watched_at
-        FROM lessons l
-        LEFT JOIN lesson_progress lp ON l.id = lp.lesson_id AND lp.user_id = ?
-        WHERE l.section_id = ? AND l.is_active = 1
-        ORDER BY l.order_index ASC
-      `, [userId, sectionId]);
-
-      const result = {
-        section: sectionProgress[0],
-        lessons: lessons
-      };
-
-      sendSuccess(res, result, 'تم جلب تقدم الفصل بنجاح');
-      
-    } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // الإحصائيات اليومية
-  static async getDailyStats(req, res) {
-    try {
-      const userId = req.user.id;
-      const targetDate = req.params.date || new Date().toISOString().split('T')[0];
-
-      const dailyStats = await query(`
-        SELECT 
-          COUNT(DISTINCT lp.lesson_id) as lessons_watched,
-          SUM(lp.watched_duration) as total_time,
-          COUNT(DISTINCT lp.course_id) as courses_accessed,
-          COUNT(DISTINCT CASE WHEN lp.is_completed = 1 THEN lp.lesson_id END) as lessons_completed,
-          AVG(lp.completion_percentage) as avg_completion
-        FROM lesson_progress lp
-        WHERE lp.user_id = ? AND DATE(lp.last_watched_at) = ?
-      `, [userId, targetDate]);
-
-      const lessonsDetail = await query(`
-        SELECT 
-          l.title as lesson_title,
-          c.title as course_title,
-          cs.title as section_title,
-          lp.watched_duration,
-          lp.completion_percentage,
-          lp.last_watched_at
-        FROM lesson_progress lp
-        JOIN lessons l ON lp.lesson_id = l.id
-        JOIN courses c ON l.course_id = c.id
-        JOIN course_sections cs ON l.section_id = cs.id
-        WHERE lp.user_id = ? AND DATE(lp.last_watched_at) = ?
-        ORDER BY lp.last_watched_at DESC
-      `, [userId, targetDate]);
-
-      const result = {
-        date: targetDate,
-        stats: dailyStats[0],
-        lessons_detail: lessonsDetail
-      };
-
-      sendSuccess(res, result, 'تم جلب الإحصائيات اليومية بنجاح');
-      
-    } catch (error) {
-      sendError(res, error);
-    }
-  }
-
-  // توصيات الكورسات (دالة مساعدة)
-  static async getCourseRecommendations(userId) {
-    try {
-      // توصيات بناءً على الكورسات المكتملة والفئات المفضلة
-      const recommendations = await query(`
-        SELECT DISTINCT
-          c.id, c.title, c.short_description, c.thumbnail, c.price,
-          cat.name as category_name,
-          COUNT(DISTINCT e.id) as enrolled_count
-        FROM courses c
-        LEFT JOIN course_categories cat ON c.category_id = cat.id
-        LEFT JOIN enrollments e ON c.id = e.course_id
-        WHERE c.is_active = 1 
-          AND c.id NOT IN (
-            SELECT course_id FROM enrollments WHERE user_id = ?
-          )
-          AND cat.id IN (
-            SELECT DISTINCT c2.category_id 
-            FROM enrollments e2 
-            JOIN courses c2 ON e2.course_id = c2.id 
-            WHERE e2.user_id = ?
-          )
-        GROUP BY c.id
-        ORDER BY enrolled_count DESC, c.created_at DESC
-        LIMIT 3
-      `, [userId, userId]);
-
-      return recommendations;
-    } catch (error) {
-      return [];
+      console.error('❌ خطأ في جلب لوحة المعلومات:', error);
+      sendError(res, 'حدث خطأ في جلب لوحة المعلومات');
     }
   }
 }

@@ -7,39 +7,25 @@ const router = express.Router();
 
 // الملف الشخصي
 router.get('/profile', authenticateToken, UserController.getProfile);
-
-// تحديث الملف الشخصي
 router.put('/profile', [
-  body('name')
-    .optional()
-    .trim()
-    .isLength({ min: 2, max: 100 })
-    .withMessage('الاسم يجب أن يكون بين 2-100 حرف'),
-  body('email')
-    .optional()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('البريد الإلكتروني غير صحيح'),
-  authenticateToken
+  authenticateToken,
+  body('name').optional().isLength({ min: 2, max: 100 }).withMessage('الاسم يجب أن يكون بين 2-100 حرف'),
+  body('bio').optional().isLength({ max: 500 }).withMessage('السيرة الذاتية يجب ألا تتجاوز 500 حرف'),
+  body('phone').optional().isMobilePhone().withMessage('رقم الهاتف غير صالح')
 ], UserController.updateProfile);
 
-// كورسات المستخدم
+// كورساتي
 router.get('/my-courses', authenticateToken, UserController.getMyCourses);
 
-// إنجازات المستخدم
-router.get('/achievements', authenticateToken, UserController.getAchievements);
-
-// الدروس المفضلة
+// المفضلات
 router.get('/favorites', authenticateToken, UserController.getFavorites);
-
-// إضافة/إزالة من المفضلة
 router.post('/favorites/:courseId', [
-  param('courseId').isInt().withMessage('معرف الكورس يجب أن يكون رقم'),
-  authenticateToken
+  authenticateToken,
+  param('courseId').isInt().withMessage('معرف الكورس يجب أن يكون رقم')
 ], UserController.toggleFavorite);
 
-// تاريخ التعلم
-router.get('/learning-history', authenticateToken, UserController.getLearningHistory);
+// الإنجازات
+router.get('/achievements', authenticateToken, UserController.getAchievements);
 
 // الشهادات
 router.get('/certificates', authenticateToken, UserController.getCertificates);

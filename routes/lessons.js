@@ -17,12 +17,6 @@ router.get('/course/:courseId', [
   optionalAuth
 ], LessonsController.getCourseLessons);
 
-// جلب دروس فصل محدد
-router.get('/section/:sectionId', [
-  param('sectionId').isInt().withMessage('معرف الفصل يجب أن يكون رقم'),
-  optionalAuth
-], LessonsController.getSectionLessons);
-
 // تسجيل مشاهدة درس (يتطلب مصادقة)
 router.post('/:id/watch', [
   param('id').isInt().withMessage('معرف الدرس يجب أن يكون رقم'),

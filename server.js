@@ -10,6 +10,8 @@ const { testConnection } = require('./config/database');
 const authRoutes = require('./routes/auth');
 const coursesRoutes = require('./routes/courses');
 const lessonsRoutes = require('./routes/lessons');
+const userRoutes = require('./routes/user');
+const progressRoutes = require('./routes/progress');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -54,6 +56,7 @@ app.get('/', (req, res) => {
         'Single Device Login',
         'Refresh Token System', 
         'Progress Tracking',
+        'User Management',
         'Arabic Support'
       ]
     },
@@ -96,23 +99,28 @@ app.get('/api', (req, res) => {
       endpoints: {
         authentication: '/api/auth',
         courses: '/api/courses', 
-        lessons: '/api/lessons'
+        lessons: '/api/lessons',
+        user: '/api/user',
+        progress: '/api/progress'
       },
       features: [
         'JWT Authentication',
         'Refresh Token',
         'Single Device Login',
-        'Progress Tracking'
+        'Progress Tracking',
+        'User Management'
       ]
     },
     message: 'معلومات API'
   });
 });
 
-// المسارات الأساسية
+// المسارات
 app.use('/api/auth', authRoutes);
 app.use('/api/courses', coursesRoutes);
 app.use('/api/lessons', lessonsRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/progress', progressRoutes);
 
 // معالج الأخطاء العام
 app.use((error, req, res, next) => {

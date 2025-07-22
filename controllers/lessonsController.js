@@ -2,141 +2,146 @@ const Lesson = require('../models/Lesson');
 const { sendSuccess, sendError, sendNotFound, sendForbidden } = require('../utils/response');
 
 class LessonsController {
-  // جلب تفاصيل درس
+  // جلب تفاصيل درس (محسّن ومُقاوم للأخطاء)
   static async getLesson(req, res) {
     try {
       const { id } = req.params;
       const userId = req.user?.id;
 
+      console.log(`🔍 طلب جلب الدرس: ${id} للمستخدم: ${userId || 'غير مسجل'}`);
+
+      // التحقق من صحة معرف الدرس
+      if (!id || isNaN(parseInt(id))) {
+        return sendError(res, 'معرف الدرس غير صالح', 400);
+      }
+
       // جلب تفاصيل الدرس
-      const lesson = await Lesson.findById(id, userId);
+      const lesson = await Lesson.findById(parseInt(id), userId);
 
       if (!lesson) {
         return sendNotFound(res, 'الدرس غير موجود');
       }
 
+      console.log(`✅ تم العثور على الدرس: ${lesson.title}`);
+
       // التحقق من إمكانية الوصول للدرس
-      if (userId) {
-        const accessCheck = await Lesson.checkLessonAccess(id, userId);
-        if (!accessCheck.hasAccess && accessCheck.reason === 'not_enrolled') {
-          return sendForbidden(res, 'يجب الاشتراك في الكورس أولاً');
+      const accessCheck = await Lesson.checkLessonAccess(parseInt(id), userId);
+      
+      if (!accessCheck.hasAccess) {
+        if (accessCheck.reason === 'not_enrolled') {
+          return sendForbidden(res, 'يجب الاشتراك في الكورس أولاً للوصول لهذا الدرس');
+        } else if (accessCheck.reason === 'lesson_not_found') {
+          return sendNotFound(res, 'الدرس غير موجود');
+        } else {
+          return sendForbidden(res, 'ليس لديك صلاحية للوصول لهذا الدرس');
         }
-      } else if (!lesson.is_free) {
-        return sendForbidden(res, 'يجب تسجيل الدخول للوصول لهذا الدرس');
       }
 
       // جلب التنقل والموارد بشكل آمن
+      let navigation = {
+        next_lesson: null,
+        previous_lesson: null
+      };
+      let resources = [];
+
       try {
-        const [nextLesson, previousLesson, resources] = await Promise.allSettled([
+        console.log('🔍 جلب التنقل والموارد...');
+        
+        // جلب التنقل
+        const [nextLesson, previousLesson] = await Promise.allSettled([
           Lesson.getNextLesson(lesson),
-          Lesson.getPreviousLesson(lesson),
-          Lesson.getLessonResources(id)
+          Lesson.getPreviousLesson(lesson)
         ]);
 
-        const navigation = {
-          next_lesson: nextLesson.status === 'fulfilled' && nextLesson.value ? {
+        if (nextLesson.status === 'fulfilled' && nextLesson.value) {
+          navigation.next_lesson = {
             id: nextLesson.value.id,
             title: nextLesson.value.title,
             slug: nextLesson.value.slug,
             duration: nextLesson.value.duration,
             is_free: nextLesson.value.is_free
-          } : null,
-          previous_lesson: previousLesson.status === 'fulfilled' && previousLesson.value ? {
+          };
+        }
+
+        if (previousLesson.status === 'fulfilled' && previousLesson.value) {
+          navigation.previous_lesson = {
             id: previousLesson.value.id,
             title: previousLesson.value.title,
             slug: previousLesson.value.slug,
             duration: previousLesson.value.duration,
             is_free: previousLesson.value.is_free
-          } : null
-        };
+          };
+        }
 
-        const lessonResources = resources.status === 'fulfilled' ? resources.value : [];
+        // جلب الموارد
+        try {
+          resources = await Lesson.getLessonResources(parseInt(id));
+        } catch (resourcesError) {
+          console.log('⚠️ خطأ في جلب موارد الدرس:', resourcesError.message);
+          resources = [];
+        }
 
-        sendSuccess(res, {
-          lesson: {
-            id: lesson.id,
-            title: lesson.title,
-            slug: lesson.slug,
-            description: lesson.description,
-            content: lesson.content,
-            video_url: lesson.video_url,
-            video_duration: lesson.duration,
-            order_index: lesson.order_index,
-            is_free: lesson.is_free,
-            section: {
-              id: lesson.section_id,
-              title: lesson.section_title,
-              order: lesson.section_order
-            },
-            course: {
-              id: lesson.course_id,
-              title: lesson.course_title
-            },
-            resources: lessonResources,
-            navigation: navigation,
-            user_progress: userId ? {
-              is_completed: lesson.is_completed === 1,
-              watch_time: lesson.watch_time || 0,
-              progress_percentage: lesson.progress_percentage || 0,
-              notes: lesson.notes || '',
-              bookmarked: lesson.bookmarked === 1,
-              last_watched_at: lesson.last_watched_at
-            } : null
-          }
-        }, 'تم جلب تفاصيل الدرس بنجاح');
+        console.log('✅ تم جلب التنقل والموارد بنجاح');
 
       } catch (navigationError) {
-        // إرسال الدرس بدون التنقل في حالة الخطأ
-        sendSuccess(res, {
-          lesson: {
-            id: lesson.id,
-            title: lesson.title,
-            slug: lesson.slug,
-            description: lesson.description,
-            content: lesson.content,
-            video_url: lesson.video_url,
-            video_duration: lesson.duration,
-            order_index: lesson.order_index,
-            is_free: lesson.is_free,
-            section: {
-              id: lesson.section_id,
-              title: lesson.section_title,
-              order: lesson.section_order
-            },
-            course: {
-              id: lesson.course_id,
-              title: lesson.course_title
-            },
-            resources: [],
-            navigation: {
-              next_lesson: null,
-              previous_lesson: null
-            },
-            user_progress: userId ? {
-              is_completed: lesson.is_completed === 1,
-              watch_time: lesson.watch_time || 0,
-              progress_percentage: lesson.progress_percentage || 0,
-              notes: lesson.notes || '',
-              bookmarked: lesson.bookmarked === 1,
-              last_watched_at: lesson.last_watched_at
-            } : null
-          }
-        }, 'تم جلب تفاصيل الدرس بنجاح');
+        console.log('⚠️ خطأ في جلب التنقل:', navigationError.message);
+        // متابعة بدون التنقل
       }
 
+      // تجميع الاستجابة النهائية
+      const response = {
+        lesson: {
+          id: lesson.id,
+          title: lesson.title,
+          slug: lesson.slug,
+          description: lesson.description,
+          content: lesson.content,
+          video_url: lesson.video_url,
+          video_duration: lesson.duration,
+          order_index: lesson.order_index,
+          is_free: lesson.is_free,
+          section: {
+            id: lesson.section_id,
+            title: lesson.section_title,
+            order: lesson.section_order
+          },
+          course: {
+            id: lesson.course_id,
+            title: lesson.course_title
+          },
+          resources: resources,
+          navigation: navigation,
+          user_progress: userId ? {
+            is_completed: lesson.is_completed === 1,
+            watch_time: lesson.watch_time || 0,
+            progress_percentage: lesson.progress_percentage || 0,
+            notes: lesson.notes || '',
+            bookmarked: lesson.bookmarked === 1,
+            last_watched_at: lesson.last_watched_at
+          } : null
+        }
+      };
+
+      console.log('🎉 تم إرسال بيانات الدرس بنجاح');
+      sendSuccess(res, response, 'تم جلب تفاصيل الدرس بنجاح');
+
     } catch (error) {
-      console.error('❌ خطأ في جلب الدرس:', error);
+      console.error('❌ خطأ كامل في جلب الدرس:', error);
       sendError(res, 'حدث خطأ في جلب تفاصيل الدرس');
     }
   }
 
-  // جلب دروس الكورس
+  // باقي الدوال...
   static async getCourseLessons(req, res) {
     try {
       const { courseId } = req.params;
       const userId = req.user?.id;
 
-      const lessons = await Lesson.getCourseeLessons(courseId, userId);
+      if (!courseId || isNaN(parseInt(courseId))) {
+        return sendError(res, 'معرف الكورس غير صالح', 400);
+      }
+
+      const lessons = await Lesson.getCourseeLessons(parseInt(courseId), userId);
 
       // تجميع الدروس حسب الفصول
       const sections = {};
@@ -180,61 +185,22 @@ class LessonsController {
     }
   }
 
-  // جلب دروس الفصل
-  static async getSectionLessons(req, res) {
-    try {
-      const { sectionId } = req.params;
-      const userId = req.user?.id;
-
-      const lessons = await Lesson.getSectionLessons(sectionId, userId);
-
-      const formattedLessons = lessons.map(lesson => ({
-        id: lesson.id,
-        title: lesson.title,
-        slug: lesson.slug,
-        description: lesson.description,
-        duration: lesson.duration,
-        order_index: lesson.order_index,
-        is_free: lesson.is_free,
-        section: {
-          id: lesson.section_id,
-          title: lesson.section_title,
-          order: lesson.section_order
-        },
-        user_progress: userId ? {
-          is_completed: lesson.is_completed === 1,
-          watch_time: lesson.watch_time || 0,
-          progress_percentage: lesson.progress_percentage || 0,
-          last_watched_at: lesson.last_watched_at
-        } : null
-      }));
-
-      sendSuccess(res, {
-        lessons: formattedLessons,
-        total_lessons: formattedLessons.length,
-        section_id: parseInt(sectionId)
-      }, 'تم جلب دروس الفصل بنجاح');
-
-    } catch (error) {
-      console.error('❌ خطأ في جلب دروس الفصل:', error);
-      sendError(res, 'حدث خطأ في جلب دروس الفصل');
-    }
-  }
-
-  // تسجيل مشاهدة درس
   static async recordWatch(req, res) {
     try {
       const { id } = req.params;
       const userId = req.user.id;
       const watchData = req.body;
 
-      // التحقق من إمكانية الوصول للدرس
-      const accessCheck = await Lesson.checkLessonAccess(id, userId);
+      if (!id || isNaN(parseInt(id))) {
+        return sendError(res, 'معرف الدرس غير صالح', 400);
+      }
+
+      const accessCheck = await Lesson.checkLessonAccess(parseInt(id), userId);
       if (!accessCheck.hasAccess) {
         return sendForbidden(res, 'ليس لديك صلاحية للوصول لهذا الدرس');
       }
 
-      const progress = await Lesson.recordWatchTime(id, userId, watchData);
+      const progress = await Lesson.recordWatchTime(parseInt(id), userId, watchData);
 
       sendSuccess(res, { progress }, 'تم تسجيل المشاهدة بنجاح');
 
@@ -244,19 +210,21 @@ class LessonsController {
     }
   }
 
-  // تحديد درس كمكتمل
   static async markComplete(req, res) {
     try {
       const { id } = req.params;
       const userId = req.user.id;
 
-      // التحقق من إمكانية الوصول للدرس
-      const accessCheck = await Lesson.checkLessonAccess(id, userId);
+      if (!id || isNaN(parseInt(id))) {
+        return sendError(res, 'معرف الدرس غير صالح', 400);
+      }
+
+      const accessCheck = await Lesson.checkLessonAccess(parseInt(id), userId);
       if (!accessCheck.hasAccess) {
         return sendForbidden(res, 'ليس لديك صلاحية للوصول لهذا الدرس');
       }
 
-      const result = await Lesson.markAsCompleted(id, userId);
+      const result = await Lesson.markAsCompleted(parseInt(id), userId);
 
       sendSuccess(res, result, 'تم تحديد الدرس كمكتمل بنجاح');
 
