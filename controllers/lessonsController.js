@@ -2,13 +2,11 @@ const Lesson = require('../models/Lesson');
 const { sendSuccess, sendError, sendNotFound, sendForbidden } = require('../utils/response');
 
 class LessonsController {
-  // جلب تفاصيل درس مع التنقل (مُصحح)
+  // جلب تفاصيل درس
   static async getLesson(req, res) {
     try {
       const { id } = req.params;
       const userId = req.user?.id;
-
-      console.log(`🔍 طلب جلب الدرس: ${id} للمستخدم: ${userId || 'غير مسجل'}`);
 
       // جلب تفاصيل الدرس
       const lesson = await Lesson.findById(id, userId);
@@ -20,19 +18,15 @@ class LessonsController {
       // التحقق من إمكانية الوصول للدرس
       if (userId) {
         const accessCheck = await Lesson.checkLessonAccess(id, userId);
-        if (!accessCheck.hasAccess) {
-          if (accessCheck.reason === 'not_enrolled') {
-            return sendForbidden(res, 'يجب الاشتراك في الكورس أولاً للوصول لهذا الدرس');
-          }
+        if (!accessCheck.hasAccess && accessCheck.reason === 'not_enrolled') {
+          return sendForbidden(res, 'يجب الاشتراك في الكورس أولاً');
         }
       } else if (!lesson.is_free) {
-        return sendForbidden(res, 'يجب تسجيل الدخول والاشتراك في الكورس للوصول لهذا الدرس');
+        return sendForbidden(res, 'يجب تسجيل الدخول للوصول لهذا الدرس');
       }
 
+      // جلب التنقل والموارد بشكل آمن
       try {
-        // جلب الدرس التالي والسابق بشكل آمن
-        console.log('🔍 جلب التنقل...');
-        
         const [nextLesson, previousLesson, resources] = await Promise.allSettled([
           Lesson.getNextLesson(lesson),
           Lesson.getPreviousLesson(lesson),
@@ -57,8 +51,6 @@ class LessonsController {
         };
 
         const lessonResources = resources.status === 'fulfilled' ? resources.value : [];
-
-        console.log('✅ تم جلب الدرس بنجاح');
 
         sendSuccess(res, {
           lesson: {
@@ -94,8 +86,6 @@ class LessonsController {
         }, 'تم جلب تفاصيل الدرس بنجاح');
 
       } catch (navigationError) {
-        console.error('⚠️ خطأ في جلب التنقل:', navigationError);
-        
         // إرسال الدرس بدون التنقل في حالة الخطأ
         sendSuccess(res, {
           lesson: {
@@ -131,7 +121,7 @@ class LessonsController {
               last_watched_at: lesson.last_watched_at
             } : null
           }
-        }, 'تم جلب تفاصيل الدرس بنجاح (بدون تنقل)');
+        }, 'تم جلب تفاصيل الدرس بنجاح');
       }
 
     } catch (error) {
